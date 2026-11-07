@@ -29,7 +29,8 @@ import java.util.Map;
         basePackages = {
                 "com.proyecto.servicios.repositorys.sf",
                 "com.proyecto.servicios.repositorys.gestopago",
-                "com.proyecto.servicios.repositorys.onboarding"
+                "com.proyecto.servicios.repositorys.onboarding",
+                "com.proyecto.servicios.repositorys.transaccion"
         },
         transactionManagerRef = "sfTransactionManager",
         entityManagerFactoryRef = "sfEntityManagerFactory"
@@ -69,7 +70,8 @@ public class ConfigDB {
             em.setPackagesToScan(
                     "com.proyecto.servicios.entity.sf",
                     "com.proyecto.servicios.entity.gestopago",
-                    "com.proyecto.servicios.entity.onboarding"
+                    "com.proyecto.servicios.entity.onboarding",
+                    "com.proyecto.servicios.entity.transaccion"
             );
             em.setPersistenceUnitName("sfDatasource");
 
