@@ -10,12 +10,14 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.Map;
 
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
+    private static final ZoneId ZONA_HORARIA = ZoneId.of("America/Mexico_City");
 
     // =========================================================================
     // EXCEPCIONES DE NEGOCIO Y DOMINIO
@@ -60,7 +62,7 @@ public class GlobalExceptionHandler {
         );
 
         Map<String, Object> response = new HashMap<>();
-        response.put("timestamp", LocalDateTime.now());
+        response.put("timestamp", LocalDateTime.now(ZONA_HORARIA));
         response.put("status", HttpStatus.BAD_REQUEST.value());
         response.put("error", "Error de Validación");
         response.put("detalles", errors);
@@ -79,7 +81,7 @@ public class GlobalExceptionHandler {
                 .codigo(HttpStatus.UNAUTHORIZED.value())
                 .mensaje("Fallo de autenticación con el servicio externo")
                 .detalle(ex.getMessage())
-                .timestamp(LocalDateTime.now())
+                .timestamp(LocalDateTime.now(ZONA_HORARIA))
                 .build();
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(error);
     }
@@ -91,7 +93,7 @@ public class GlobalExceptionHandler {
                 .codigo(HttpStatus.GATEWAY_TIMEOUT.value())
                 .mensaje("Tiempo de espera agotado al consultar el servicio externo")
                 .detalle(ex.getMessage())
-                .timestamp(LocalDateTime.now())
+                .timestamp(LocalDateTime.now(ZONA_HORARIA))
                 .build();
         return ResponseEntity.status(HttpStatus.GATEWAY_TIMEOUT).body(error);
     }
@@ -103,7 +105,7 @@ public class GlobalExceptionHandler {
                 .codigo(HttpStatus.SERVICE_UNAVAILABLE.value())
                 .mensaje("Servicio externo no disponible temporalmente")
                 .detalle(ex.getMessage())
-                .timestamp(LocalDateTime.now())
+                .timestamp(LocalDateTime.now(ZONA_HORARIA))
                 .build();
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(error);
     }
@@ -117,7 +119,7 @@ public class GlobalExceptionHandler {
                 .codigo(status.value())
                 .mensaje("Respuesta no exitosa del servicio externo")
                 .detalle(ex.getMessage())
-                .timestamp(LocalDateTime.now())
+                .timestamp(LocalDateTime.now(ZONA_HORARIA))
                 .build();
         return ResponseEntity.status(status).body(error);
     }
@@ -130,7 +132,7 @@ public class GlobalExceptionHandler {
                 .codigo(status.value())
                 .mensaje("Error al procesar la integración con el servicio externo")
                 .detalle(ex.getMessage())
-                .timestamp(LocalDateTime.now())
+                .timestamp(LocalDateTime.now(ZONA_HORARIA))
                 .build();
         return ResponseEntity.status(status).body(error);
     }
@@ -142,14 +144,13 @@ public class GlobalExceptionHandler {
                 .codigo(HttpStatus.INTERNAL_SERVER_ERROR.value())
                 .mensaje("Error interno del servidor")
                 .detalle("Ocurrió un error inesperado al procesar la solicitud")
-                .timestamp(LocalDateTime.now())
+                .timestamp(LocalDateTime.now(ZONA_HORARIA))
                 .build();
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(error);
     }
 
     private ResponseEntity<Map<String, Object>> buildBusinessResponse(HttpStatus status, String message) {
         Map<String, Object> response = new HashMap<>();
-        response.put("timestamp", LocalDateTime.now());
         response.put("status", status.value());
         response.put("message", message);
         return ResponseEntity.status(status).body(response);

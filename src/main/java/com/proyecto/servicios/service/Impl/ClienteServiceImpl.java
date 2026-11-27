@@ -14,15 +14,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.Period;
+import java.time.ZoneId;
 import java.util.List;
-import java.util.Random;
 
 @Service
 @RequiredArgsConstructor
 public class ClienteServiceImpl implements ClienteService {
+
+    private static final ZoneId ZONA_HORARIA = ZoneId.of("America/Mexico_City");
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final ClienteRepository clienteRepository;
     private final CuentaRepository cuentaRepository;
@@ -31,7 +35,8 @@ public class ClienteServiceImpl implements ClienteService {
     @Transactional
     public Cliente registrarCliente(ClienteDTO dto) {
         // Regla: Mayoría de edad (+18 años)
-        if (dto.getFechaNacimiento() == null || Period.between(dto.getFechaNacimiento(), LocalDate.now()).getYears() < 18) {
+        if (dto.getFechaNacimiento() == null
+                || Period.between(dto.getFechaNacimiento(), LocalDate.now(ZONA_HORARIA)).getYears() < 18) {
             throw new BusinessException("El cliente debe ser mayor de edad (18 años o más).");
         }
 
@@ -97,7 +102,7 @@ public class ClienteServiceImpl implements ClienteService {
     @Override
     @Transactional
     public Cliente actualizarCliente(Long id, ClienteDTO dto) {
-        Cliente cliente = buscarPorId(id);
+        Cliente cliente = obtenerClientePorId(id);
 
         if (Boolean.FALSE.equals(cliente.getActivo())) {
             throw new BusinessException("No se puede actualizar la información de un cliente inactivo.");
@@ -140,7 +145,7 @@ public class ClienteServiceImpl implements ClienteService {
     @Override
     @Transactional
     public void bajaLogica(Long id) {
-        Cliente cliente = buscarPorId(id);
+        Cliente cliente = obtenerClientePorId(id);
         cliente.setActivo(false);
 
         // Desactivación lógica de la cuenta asociada
@@ -158,8 +163,7 @@ public class ClienteServiceImpl implements ClienteService {
     @Override
     @Transactional(readOnly = true)
     public Cliente buscarPorId(Long id) {
-        return clienteRepository.findById(id)
-                .orElseThrow(() -> new ClienteNoEncontradoException("Cliente no encontrado con ID: " + id));
+        return obtenerClientePorId(id);
     }
 
     @Override
@@ -195,11 +199,15 @@ public class ClienteServiceImpl implements ClienteService {
         return clienteRepository.findByFechaRegistroBetween(inicio, fin);
     }
 
+    private Cliente obtenerClientePorId(Long id) {
+        return clienteRepository.findById(id)
+                .orElseThrow(() -> new ClienteNoEncontradoException("Cliente no encontrado con ID: " + id));
+    }
+
     private String generarNumeroCuentaUnico() {
         String numCuenta;
-        Random random = new Random();
         do {
-            long number = (long) (random.nextDouble() * 9000000000L) + 1000000000L;
+            long number = RANDOM.nextLong(1_000_000_000L, 10_000_000_000L);
             numCuenta = "CTA-" + number;
         } while (cuentaRepository.existsByNumeroCuenta(numCuenta));
         return numCuenta;

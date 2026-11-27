@@ -5,6 +5,7 @@ import lombok.*;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 @Entity
 @Table(name = "clientes")
@@ -79,6 +80,6 @@ public class Cliente {
     @PrePersist
     public void prePersist() {
         this.activo = true;
-        this.fechaRegistro = LocalDateTime.now();
+        this.fechaRegistro = LocalDateTime.now(ZoneId.of("America/Mexico_City"));
     }
 }

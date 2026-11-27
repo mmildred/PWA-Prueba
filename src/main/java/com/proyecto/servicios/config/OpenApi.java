@@ -14,6 +14,7 @@ import java.util.List;
 
 @Configuration
 public class OpenApi {
+    private static final String BEARER_AUTH_SCHEME = "BearerAuth";
 
     @Bean
     public OpenAPI openAPI() {
@@ -26,10 +27,10 @@ public class OpenApi {
                 .servers(List.of(
                         new Server().url("http://localhost:8081").description("Servidor Local de Desarrollo")
                 ))
-                .addSecurityItem(new SecurityRequirement().addList("BearerAuth"))
+                .addSecurityItem(new SecurityRequirement().addList(BEARER_AUTH_SCHEME))
                 .components(new Components()
-                        .addSecuritySchemes("BearerAuth", new SecurityScheme()
-                                .name("BearerAuth")
+                        .addSecuritySchemes(BEARER_AUTH_SCHEME, new SecurityScheme()
+                                .name(BEARER_AUTH_SCHEME)
                                 .type(SecurityScheme.Type.HTTP)
                                 .scheme("bearer")
                                 .bearerFormat("JWT")

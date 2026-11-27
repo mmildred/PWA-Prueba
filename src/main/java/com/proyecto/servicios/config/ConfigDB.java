@@ -36,7 +36,6 @@ import java.util.Map;
         entityManagerFactoryRef = "sfEntityManagerFactory"
 )
 public class ConfigDB {
-    @Autowired
     private Environment env;
 
     @Bean(name="sfDatasource")

@@ -27,11 +27,12 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Service
 @Slf4j
 public class TransaccionServiceImpl implements TransaccionService {
+
+    private static final String BEARER_PREFIX = "Bearer ";
 
     private final TransaccionRepository transaccionRepository;
     private final CuentaRepository cuentaRepository;
@@ -69,57 +70,86 @@ public class TransaccionServiceImpl implements TransaccionService {
                 enmascararCuenta(request.getNumeroCuenta()), request.getClienteId(), request.getIdServicio(),
                 request.getIdProducto(), request.getMonto());
 
-        // 1. CONTROL DE IDEMPOTENCIA (Prevención estricta de solicitudes duplicadas)
-        Optional<Transaccion> txExistente = transaccionRepository.findByIdempotencyKey(request.getIdempotencyKey());
-        if (txExistente.isPresent()) {
-            Transaccion tx = txExistente.get();
-            if (tx.getEstatus() == EstatusTransaccion.COMPLETADA) {
-                log.info("Solicitud idempotente: La transacción previa ya fue completada exitosamente con folio {}", tx.getFolio());
-                return mapToResponse(tx);
-            } else if (tx.getEstatus() == EstatusTransaccion.EN_PROCESO || tx.getEstatus() == EstatusTransaccion.PENDIENTE_CONCILIACION) {
-                log.warn("Intento de duplicidad: La transacción con clave {} se encuentra en estado {}",
-                        request.getIdempotencyKey(), tx.getEstatus());
-                throw new TransaccionDuplicadaException(
-                        "La transacción con clave de idempotencia '" + request.getIdempotencyKey() +
-                                "' se encuentra en estado '" + tx.getEstatus() + "'. No reenvíe la solicitud.");
-            } else {
-                log.info("Retornando transacción previa en estado {}", tx.getEstatus());
-                return mapToResponse(tx);
-            }
+        // 1. Control de idempotencia
+        Optional<TransaccionResponse> respuestaIdempotente = verificarIdempotencia(request.getIdempotencyKey());
+        if (respuestaIdempotente.isPresent()) {
+            return respuestaIdempotente.get();
         }
 
-        // 2. VALIDACIÓN DEL PRODUCTO Y RESTRICCIONES EN EL CATÁLOGO
+        // 2. Validación de catálogo
         String nombreProducto = validarProductoEnCatalogo(request.getIdProducto(), request.getMonto());
 
-        // 3. BLOQUEO PESIMISTA DE LA CUENTA Y VALIDACIÓN DE IDENTIDAD Y SALDO
-        Cuenta cuenta = cuentaRepository.findByNumeroCuentaForUpdate(request.getNumeroCuenta())
-                .orElseThrow(() -> new BusinessException("La cuenta bancaria '" + request.getNumeroCuenta() + "' no existe en el sistema."));
+        // 3. Bloqueo pesimista y validación
+        Cuenta cuenta = validarCuentaYCliente(request.getNumeroCuenta(), request.getClienteId(), request.getMonto());
 
-        if (!"ACTIVA".equalsIgnoreCase(cuenta.getEstatus())) {
-            throw new BusinessException("La cuenta " + request.getNumeroCuenta() + " no se encuentra ACTIVA. Estatus actual: " + cuenta.getEstatus());
-        }
-
-        if (cuenta.getCliente() == null || !cuenta.getCliente().getId().equals(request.getClienteId())) {
-            throw new BusinessException("El cliente con ID " + request.getClienteId() + " no está autorizado para realizar operaciones sobre la cuenta especificada.");
-        }
-
-        if (!Boolean.TRUE.equals(cuenta.getCliente().getActivo())) {
-            throw new BusinessException("El cliente titular de la cuenta se encuentra inactivo.");
-        }
-
-        if (cuenta.getSaldo().compareTo(request.getMonto()) < 0) {
-            throw new SaldoInsuficienteException("Saldo insuficiente en la cuenta. Saldo disponible: $" +
-                    cuenta.getSaldo() + ", Monto requerido: $" + request.getMonto());
-        }
-
-        // 4. DÉBITO PREVENTIVO DE SALDO E INTEGRIDAD TRANSACCIONAL
+        // 4. Débito preventivo
         BigDecimal saldoAnterior = cuenta.getSaldo();
         BigDecimal saldoPosterior = saldoAnterior.subtract(request.getMonto());
         cuenta.setSaldo(saldoPosterior);
         cuentaRepository.save(cuenta);
 
         String folio = UUID.randomUUID().toString();
-        Transaccion transaccion = Transaccion.builder()
+        Transaccion transaccion = construirTransaccion(request, cuenta, nombreProducto, folio, saldoAnterior, saldoPosterior);
+        transaccion = transaccionRepository.saveAndFlush(transaccion);
+
+        log.info("Saldo debitado preventivamente: cuenta={}, saldoAnterior={}, saldoPosterior={}, folio={}",
+                enmascararCuenta(cuenta.getNumeroCuenta()), saldoAnterior, saldoPosterior, folio);
+
+        // 5. Invocación a Gestopago
+        return ejecutarLlamadaProveedor(transaccion, cuenta, request);
+    }
+
+    private Optional<TransaccionResponse> verificarIdempotencia(String idempotencyKey) {
+        Optional<Transaccion> txExistente = transaccionRepository.findByIdempotencyKey(idempotencyKey);
+        if (txExistente.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Transaccion tx = txExistente.get();
+        if (tx.getEstatus() == EstatusTransaccion.COMPLETADA) {
+            log.info("Solicitud idempotente: La transacción previa ya fue completada exitosamente con folio {}", tx.getFolio());
+            return Optional.of(mapToResponse(tx));
+        }
+
+        if (tx.getEstatus() == EstatusTransaccion.EN_PROCESO || tx.getEstatus() == EstatusTransaccion.PENDIENTE_CONCILIACION) {
+            log.warn("Intento de duplicidad: La transacción con clave {} se encuentra en estado {}",
+                    idempotencyKey, tx.getEstatus());
+            throw new TransaccionDuplicadaException(
+                    "La transacción con clave de idempotencia '" + idempotencyKey +
+                            "' se encuentra en estado '" + tx.getEstatus() + "'. No reenvíe la solicitud.");
+        }
+
+        log.info("Retornando transacción previa en estado {}", tx.getEstatus());
+        return Optional.of(mapToResponse(tx));
+    }
+
+    private Cuenta validarCuentaYCliente(String numeroCuenta, Long clienteId, BigDecimal monto) {
+        Cuenta cuenta = cuentaRepository.findByNumeroCuentaForUpdate(numeroCuenta)
+                .orElseThrow(() -> new BusinessException("La cuenta bancaria '" + numeroCuenta + "' no existe en el sistema."));
+
+        if (!"ACTIVA".equalsIgnoreCase(cuenta.getEstatus())) {
+            throw new BusinessException("La cuenta " + numeroCuenta + " no se encuentra ACTIVA. Estatus actual: " + cuenta.getEstatus());
+        }
+
+        if (cuenta.getCliente() == null || !cuenta.getCliente().getId().equals(clienteId)) {
+            throw new BusinessException("El cliente con ID " + clienteId + " no está autorizado para realizar operaciones sobre la cuenta especificada.");
+        }
+
+        if (!Boolean.TRUE.equals(cuenta.getCliente().getActivo())) {
+            throw new BusinessException("El cliente titular de la cuenta se encuentra inactivo.");
+        }
+
+        if (cuenta.getSaldo().compareTo(monto) < 0) {
+            throw new SaldoInsuficienteException("Saldo insuficiente en la cuenta. Saldo disponible: $" +
+                    cuenta.getSaldo() + ", Monto requerido: $" + monto);
+        }
+
+        return cuenta;
+    }
+
+    private Transaccion construirTransaccion(PagarServicioRequest request, Cuenta cuenta, String nombreProducto,
+                                             String folio, BigDecimal saldoAnterior, BigDecimal saldoPosterior) {
+        return Transaccion.builder()
                 .folio(folio)
                 .idempotencyKey(request.getIdempotencyKey())
                 .cuenta(cuenta)
@@ -134,14 +164,10 @@ public class TransaccionServiceImpl implements TransaccionService {
                 .saldoAnterior(saldoAnterior)
                 .saldoPosterior(saldoPosterior)
                 .build();
+    }
 
-        transaccion = transaccionRepository.saveAndFlush(transaccion);
-        log.info("Saldo debitado preventivamente: cuenta={}, saldoAnterior={}, saldoPosterior={}, folio={}",
-                enmascararCuenta(cuenta.getNumeroCuenta()), saldoAnterior, saldoPosterior, folio);
-
-        // 5. INVOCACIÓN SEGURA AL PROVEEDOR GESTOPAGO (sendTx.do)
+    private TransaccionResponse ejecutarLlamadaProveedor(Transaccion transaccion, Cuenta cuenta, PagarServicioRequest request) {
         String bearerToken = obtenerBearerTokenSeguro();
-
         GestoPagoTxRequest txRequest = GestoPagoTxRequest.builder()
                 .idServicio(request.getIdServicio())
                 .idProducto(request.getIdProducto())
@@ -151,68 +177,73 @@ public class TransaccionServiceImpl implements TransaccionService {
 
         try {
             log.info("Enviando petición a Gestopago [POST sendTx.do]: folio={}, servicio={}, producto={}, monto={}",
-                    folio, request.getIdServicio(), request.getIdProducto(), request.getMonto());
+                    transaccion.getFolio(), request.getIdServicio(), request.getIdProducto(), request.getMonto());
 
             GestoPagoTxResponse response = gestoPagoTxClient.sendTx(bearerToken, txRequest);
+            return procesarRespuestaGestopago(transaccion, cuenta, response);
 
-            if (response != null && (response.getStatus() == null || response.getStatus() == 0 || response.getStatus() == 200)) {
-                // A) RESPUESTA EXITOSA DEL PROVEEDOR
-                transaccion.setEstatus(EstatusTransaccion.COMPLETADA);
-                transaccion.setFolioProveedor(response.getFolio() != null ? response.getFolio() : "GP-" + System.currentTimeMillis());
-                transaccion.setAutorizacionProveedor(response.getAutorizacion() != null ? response.getAutorizacion() : "AUTH-" + System.currentTimeMillis());
-                transaccion.setMensajeProveedor(response.getMessage() != null ? response.getMessage() : "TRANSACCION EXITOSA");
-                transaccion.setCodigoRespuestaProveedor(response.getStatus() != null ? String.valueOf(response.getStatus()) : "0");
-                transaccionRepository.save(transaccion);
+        } catch (Exception e) {
+            return manejarExcepcionIntegracion(transaccion, cuenta, e);
+        }
+    }
 
-                log.info("Transacción aprobada por Gestopago: folio={}, autorizacion={}",
-                        folio, transaccion.getAutorizacionProveedor());
-                return mapToResponse(transaccion);
+    private TransaccionResponse procesarRespuestaGestopago(Transaccion transaccion, Cuenta cuenta, GestoPagoTxResponse response) {
+        boolean esExitosa = response != null && (response.getStatus() == null || response.getStatus() == 0 || response.getStatus() == 200);
 
-            } else {
-                // B) RECHAZO EXPLÍCITO DEL PROVEEDOR -> REVERSO AUTOMÁTICO INMEDIATO
-                String mensajeRechazo = response != null && response.getMessage() != null
-                        ? response.getMessage() : "TRANSACCION RECHAZADA POR PROVEEDOR";
-                log.warn("Rechazo explícito del proveedor: folio={}, mensaje={}. Ejecutando reverso automático del saldo...",
-                        folio, mensajeRechazo);
+        if (esExitosa) {
+            transaccion.setEstatus(EstatusTransaccion.COMPLETADA);
+            transaccion.setFolioProveedor(response.getFolio() != null ? response.getFolio() : "GP-" + System.currentTimeMillis());
+            transaccion.setAutorizacionProveedor(response.getAutorizacion() != null ? response.getAutorizacion() : "AUTH-" + System.currentTimeMillis());
+            transaccion.setMensajeProveedor(response.getMessage() != null ? response.getMessage() : "TRANSACCION EXITOSA");
+            transaccion.setCodigoRespuestaProveedor(response.getStatus() != null ? String.valueOf(response.getStatus()) : "0");
+            transaccionRepository.save(transaccion);
 
-                cuenta.setSaldo(cuenta.getSaldo().add(transaccion.getMonto()));
-                cuentaRepository.save(cuenta);
+            log.info("Transacción aprobada por Gestopago: folio={}, autorizacion={}",
+                    transaccion.getFolio(), transaccion.getAutorizacionProveedor());
+            return mapToResponse(transaccion);
+        }
 
-                transaccion.setEstatus(EstatusTransaccion.RECHAZADA);
-                transaccion.setSaldoPosterior(cuenta.getSaldo());
-                transaccion.setMensajeProveedor(mensajeRechazo);
-                transaccion.setCodigoRespuestaProveedor(response != null && response.getStatus() != null ? String.valueOf(response.getStatus()) : "1");
-                transaccion.setMotivoFalla("Rechazado por proveedor externo: " + mensajeRechazo);
-                transaccionRepository.save(transaccion);
+        String mensajeRechazo = response != null && response.getMessage() != null
+                ? response.getMessage() : "TRANSACCION RECHAZADA POR PROVEEDOR";
+        log.warn("Rechazo explícito del proveedor: folio={}, mensaje={}. Ejecutando reverso automático del saldo...",
+                transaccion.getFolio(), mensajeRechazo);
 
-                return mapToResponse(transaccion);
-            }
+        cuenta.setSaldo(cuenta.getSaldo().add(transaccion.getMonto()));
+        cuentaRepository.save(cuenta);
 
-        } catch (ServiceTimeoutException | RetryableException e) {
-            // C) TIMEOUT DEL SERVICIO EXTERNO -> REGLA CRÍTICA: NO REVERSAR CIEGAMENTE
+        transaccion.setEstatus(EstatusTransaccion.RECHAZADA);
+        transaccion.setSaldoPosterior(cuenta.getSaldo());
+        transaccion.setMensajeProveedor(mensajeRechazo);
+        transaccion.setCodigoRespuestaProveedor(response != null && response.getStatus() != null ? String.valueOf(response.getStatus()) : "1");
+        transaccion.setMotivoFalla("Rechazado por proveedor externo: " + mensajeRechazo);
+        transaccionRepository.save(transaccion);
+
+        return mapToResponse(transaccion);
+    }
+
+    private TransaccionResponse manejarExcepcionIntegracion(Transaccion transaccion, Cuenta cuenta, Exception e) {
+        String folio = transaccion.getFolio();
+
+        if (e instanceof ServiceTimeoutException || e instanceof RetryableException) {
             log.error("TIMEOUT al comunicar con Gestopago para folio {}. Transacción marcada como PENDIENTE_CONCILIACION: {}",
                     folio, sanitizeLog(e.getMessage()));
-
             transaccion.setEstatus(EstatusTransaccion.PENDIENTE_CONCILIACION);
             transaccion.setMotivoFalla("Tiempo de espera agotado al comunicar con Gestopago. Transacción retenida para conciliación.");
             transaccionRepository.save(transaccion);
-
             return mapToResponse(transaccion);
+        }
 
-        } catch (ServiceCommunicationException e) {
-            // D) ERROR DE COMUNICACIÓN / CAÍDA DE RED -> RETENER PARA CONCILIACIÓN
+        if (e instanceof ServiceCommunicationException) {
             log.error("Fallo de comunicación de red al enviar transacción folio {}. Marcada como PENDIENTE_CONCILIACION: {}",
                     folio, sanitizeLog(e.getMessage()));
-
             transaccion.setEstatus(EstatusTransaccion.PENDIENTE_CONCILIACION);
             transaccion.setMotivoFalla("Fallo de comunicación de red al conectar con Gestopago. Retenida para conciliación.");
             transaccionRepository.save(transaccion);
-
             return mapToResponse(transaccion);
+        }
 
-        } catch (ServiceResponseException e) {
-            if (e.getRawStatusCode() >= 400 && e.getRawStatusCode() < 500) {
-                // Error sintáctico o parámetros rechazados en el cliente HTTP -> Seguro reversar
+        if (e instanceof ServiceResponseException sre) {
+            if (sre.getRawStatusCode() >= 400 && sre.getRawStatusCode() < 500) {
                 log.warn("Rechazo HTTP 4xx del proveedor para folio {}. Ejecutando reverso de saldo: {}", folio, sanitizeLog(e.getMessage()));
                 cuenta.setSaldo(cuenta.getSaldo().add(transaccion.getMonto()));
                 cuentaRepository.save(cuenta);
@@ -221,26 +252,21 @@ public class TransaccionServiceImpl implements TransaccionService {
                 transaccion.setSaldoPosterior(cuenta.getSaldo());
                 transaccion.setMotivoFalla("Error en parámetros rechazado por el proveedor: " + e.getMessage());
                 transaccionRepository.save(transaccion);
-
-                return mapToResponse(transaccion);
-            } else {
-                // Error 5xx en el servidor remoto -> Puede haberse procesado, marcar para conciliación
-                log.error("Error HTTP 5xx de Gestopago para folio {}. Retenida en PENDIENTE_CONCILIACION: {}", folio, sanitizeLog(e.getMessage()));
-                transaccion.setEstatus(EstatusTransaccion.PENDIENTE_CONCILIACION);
-                transaccion.setMotivoFalla("Error interno 5xx en Gestopago. Retenida para conciliación.");
-                transaccionRepository.save(transaccion);
-
                 return mapToResponse(transaccion);
             }
 
-        } catch (Exception e) {
-            log.error("Excepción inesperada al procesar integración externa para folio {}: {}", folio, sanitizeLog(e.getMessage()));
+            log.error("Error HTTP 5xx de Gestopago para folio {}. Retenida en PENDIENTE_CONCILIACION: {}", folio, sanitizeLog(e.getMessage()));
             transaccion.setEstatus(EstatusTransaccion.PENDIENTE_CONCILIACION);
-            transaccion.setMotivoFalla("Excepción inesperada durante la integración externa. Retenida para conciliación.");
+            transaccion.setMotivoFalla("Error interno 5xx en Gestopago. Retenida para conciliación.");
             transaccionRepository.save(transaccion);
-
             return mapToResponse(transaccion);
         }
+
+        log.error("Excepción inesperada al procesar integración externa para folio {}: {}", folio, sanitizeLog(e.getMessage()));
+        transaccion.setEstatus(EstatusTransaccion.PENDIENTE_CONCILIACION);
+        transaccion.setMotivoFalla("Excepción inesperada durante la integración externa. Retenida para conciliación.");
+        transaccionRepository.save(transaccion);
+        return mapToResponse(transaccion);
     }
 
     @Override
@@ -257,7 +283,7 @@ public class TransaccionServiceImpl implements TransaccionService {
         return transaccionRepository.findByNumeroCuentaOrderByFechaCreacionDesc(numeroCuenta)
                 .stream()
                 .map(this::mapToResponse)
-                .collect(Collectors.toList());
+                .toList();
     }
 
     @Override
@@ -266,7 +292,7 @@ public class TransaccionServiceImpl implements TransaccionService {
         return transaccionRepository.findByClienteIdOrderByFechaCreacionDesc(clienteId)
                 .stream()
                 .map(this::mapToResponse)
-                .collect(Collectors.toList());
+                .toList();
     }
 
     @Override
@@ -286,32 +312,14 @@ public class TransaccionServiceImpl implements TransaccionService {
         String accion = request.getAccion().toUpperCase();
         switch (accion) {
             case "CONFIRMAR":
-                tx.setEstatus(EstatusTransaccion.COMPLETADA);
-                tx.setFolioProveedor(request.getFolioProveedor() != null ? request.getFolioProveedor() : "GP-CONCIL-" + System.currentTimeMillis());
-                tx.setAutorizacionProveedor(request.getAutorizacion() != null ? request.getAutorizacion() : "AUTH-CONCIL-" + System.currentTimeMillis());
-                tx.setMensajeProveedor("CONCILIADA EXITOSA: " + (request.getObservaciones() != null ? request.getObservaciones() : "Confirmada por mesa de control"));
-                transaccionRepository.save(tx);
-                log.info("Transacción {} conciliada como COMPLETADA", folio);
+                ejecutarConfirmacionConciliacion(tx, request, folio);
                 break;
-
             case "REVERSAR":
-                // Se confirmó con el proveedor que la transacción nunca se aplicó -> Desembolso al cliente
-                Cuenta cuenta = cuentaRepository.findByNumeroCuentaForUpdate(tx.getNumeroCuenta())
-                        .orElseThrow(() -> new BusinessException("Cuenta " + tx.getNumeroCuenta() + " no encontrada para reverso"));
-                cuenta.setSaldo(cuenta.getSaldo().add(tx.getMonto()));
-                cuentaRepository.save(cuenta);
-
-                tx.setEstatus(EstatusTransaccion.REVERTIDA);
-                tx.setSaldoPosterior(cuenta.getSaldo());
-                tx.setMotivoFalla("Revertida tras conciliación: " + (request.getObservaciones() != null ? request.getObservaciones() : "Sin procesamiento externo"));
-                transaccionRepository.save(tx);
-                log.info("Transacción {} conciliada como REVERTIDA. Saldo restaurado a la cuenta {}", folio, tx.getNumeroCuenta());
+                ejecutarReversoConciliacion(tx, request, folio);
                 break;
-
             case "CONSULTAR":
                 log.info("Consulta de conciliación sobre transacción {}", folio);
                 break;
-
             default:
                 throw new BusinessException("Acción de conciliación no reconocida: " + request.getAccion());
         }
@@ -319,33 +327,33 @@ public class TransaccionServiceImpl implements TransaccionService {
         return mapToResponse(tx);
     }
 
-    /**
-     * Valida la existencia y precio del producto en el catálogo oficial de Gestopago
-     */
+    private void ejecutarConfirmacionConciliacion(Transaccion tx, ConciliarTransaccionRequest request, String folio) {
+        tx.setEstatus(EstatusTransaccion.COMPLETADA);
+        tx.setFolioProveedor(request.getFolioProveedor() != null ? request.getFolioProveedor() : "GP-CONCIL-" + System.currentTimeMillis());
+        tx.setAutorizacionProveedor(request.getAutorizacion() != null ? request.getAutorizacion() : "AUTH-CONCIL-" + System.currentTimeMillis());
+        tx.setMensajeProveedor("CONCILIADA EXITOSA: " + (request.getObservaciones() != null ? request.getObservaciones() : "Confirmada por mesa de control"));
+        transaccionRepository.save(tx);
+        log.info("Transacción {} conciliada como COMPLETADA", folio);
+    }
+
+    private void ejecutarReversoConciliacion(Transaccion tx, ConciliarTransaccionRequest request, String folio) {
+        Cuenta cuenta = cuentaRepository.findByNumeroCuentaForUpdate(tx.getNumeroCuenta())
+                .orElseThrow(() -> new BusinessException("Cuenta " + tx.getNumeroCuenta() + " no encontrada para reverso"));
+        cuenta.setSaldo(cuenta.getSaldo().add(tx.getMonto()));
+        cuentaRepository.save(cuenta);
+
+        tx.setEstatus(EstatusTransaccion.REVERTIDA);
+        tx.setSaldoPosterior(cuenta.getSaldo());
+        tx.setMotivoFalla("Revertida tras conciliación: " + (request.getObservaciones() != null ? request.getObservaciones() : "Sin procesamiento externo"));
+        transaccionRepository.save(tx);
+        log.info("Transacción {} conciliada como REVERTIDA. Saldo restaurado a la cuenta {}", folio, tx.getNumeroCuenta());
+    }
+
     private String validarProductoEnCatalogo(String idProducto, BigDecimal monto) {
         try {
             ProductoListResponse catalogo = productoService.obtenerListaProductos();
             if (catalogo != null && catalogo.getProductos() != null && !catalogo.getProductos().isEmpty()) {
-                Optional<ProductoDTO> match = catalogo.getProductos().stream()
-                        .filter(p -> idProducto.equalsIgnoreCase(p.getId()) || idProducto.equalsIgnoreCase(p.getSku()))
-                        .findFirst();
-
-                if (match.isEmpty()) {
-                    throw new BusinessException("El producto con ID o SKU '" + idProducto + "' no existe en el catálogo disponible.");
-                }
-
-                ProductoDTO prod = match.get();
-                if (Boolean.FALSE.equals(prod.getActivo())) {
-                    throw new BusinessException("El producto '" + prod.getNombre() + "' (" + idProducto + ") se encuentra inactivo en el catálogo.");
-                }
-
-                if (prod.getPrecio() != null && prod.getPrecio().compareTo(BigDecimal.ZERO) > 0) {
-                    if (prod.getPrecio().compareTo(monto) != 0) {
-                        throw new BusinessException("El monto solicitado ($" + monto +
-                                ") no coincide con el valor permitido por el catálogo para este producto ($" + prod.getPrecio() + ").");
-                    }
-                }
-                return prod.getNombre() != null ? prod.getNombre() : "Producto " + idProducto;
+                return buscarYValidarProducto(catalogo.getProductos(), idProducto, monto);
             }
         } catch (BusinessException be) {
             throw be;
@@ -353,23 +361,42 @@ public class TransaccionServiceImpl implements TransaccionService {
             log.warn("No fue posible validar catálogo en vivo (modo contingencia): {}", sanitizeLog(e.getMessage()));
         }
 
-        if (monto == null || monto.compareTo(BigDecimal.ZERO) <= 0 || monto.compareTo(new BigDecimal("50000.00")) > 0) {
-            throw new BusinessException("Monto fuera de los límites permitidos ($0.01 - $50,000.00)");
-        }
+        validarRangoMonto(monto);
         return "Producto " + idProducto;
     }
 
-    /**
-     * Recupera el token Bearer desde configuración segura o almacén activo en BD sin exponerlo
-     */
+    private String buscarYValidarProducto(List<ProductoDTO> productos, String idProducto, BigDecimal monto) {
+        ProductoDTO prod = productos.stream()
+                .filter(p -> idProducto.equalsIgnoreCase(p.getId()) || idProducto.equalsIgnoreCase(p.getSku()))
+                .findFirst()
+                .orElseThrow(() -> new BusinessException("El producto con ID o SKU '" + idProducto + "' no existe en el catálogo disponible."));
+
+        if (Boolean.FALSE.equals(prod.getActivo())) {
+            throw new BusinessException("El producto '" + prod.getNombre() + "' (" + idProducto + ") se encuentra inactivo en el catálogo.");
+        }
+
+        if (prod.getPrecio() != null && prod.getPrecio().compareTo(BigDecimal.ZERO) > 0 && prod.getPrecio().compareTo(monto) != 0) {
+            throw new BusinessException("El monto solicitado ($" + monto +
+                    ") no coincide con el valor permitido por el catálogo para este producto ($" + prod.getPrecio() + ").");
+        }
+
+        return prod.getNombre() != null ? prod.getNombre() : "Producto " + idProducto;
+    }
+
+    private void validarRangoMonto(BigDecimal monto) {
+        if (monto == null || monto.compareTo(BigDecimal.ZERO) <= 0 || monto.compareTo(new BigDecimal("50000.00")) > 0) {
+            throw new BusinessException("Monto fuera de los límites permitidos ($0.01 - $50,000.00)");
+        }
+    }
+
     private String obtenerBearerTokenSeguro() {
         if (configuredToken != null && !configuredToken.trim().isEmpty()) {
             String token = configuredToken.trim();
-            return token.regionMatches(true, 0, "Bearer ", 0, 7) ? token : "Bearer " + token;
+            return token.regionMatches(true, 0, BEARER_PREFIX, 0, 7) ? token : BEARER_PREFIX + token;
         }
 
         return gestoPagoTokenService.obtenerTokenActivo(idDistribuidor, codigoDispositivo)
-                .map(t -> "Bearer " + t.getToken())
+                .map(t -> BEARER_PREFIX + t.getToken())
                 .orElseThrow(() -> new ServiceAuthenticationException("No se encontró Bearer Token configurado ni token activo en base de datos"));
     }
 
@@ -409,7 +436,7 @@ public class TransaccionServiceImpl implements TransaccionService {
 
     private String sanitizeLog(String msg) {
         if (msg == null) return "";
-        return msg.replaceAll("(?i)(bearer\\s+[a-zA-Z0-9._-]+)", "Bearer ***")
+        return msg.replaceAll("(?i)(bearer\\s+[\\w.-]+)", BEARER_PREFIX + "***")
                 .replaceAll("(?i)(password|token|secret)=[^&\\s]+", "$1=***");
     }
 }

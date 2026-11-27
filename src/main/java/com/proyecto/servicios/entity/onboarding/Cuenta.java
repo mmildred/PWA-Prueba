@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 @Entity
 @Table(name = "cuentas")
@@ -35,7 +36,7 @@ public class Cuenta {
 
     @PrePersist
     public void prePersist() {
-        this.fechaCreacion = LocalDateTime.now();
+        this.fechaCreacion = LocalDateTime.now(ZoneId.of("America/Mexico_City"));
         if (this.estatus == null) this.estatus = "ACTIVA";
     }
 }
