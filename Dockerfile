@@ -16,11 +16,13 @@ RUN ./gradlew bootJar -x test
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 
-# Copiar el JAR generado en la etapa de compilación
-COPY --from=build /app/build/libs/*.jar app.jar
+# 1. Crear un grupo y un usuario sin privilegios (sintaxis para Alpine)
+RUN addgroup -S spring && adduser -S spring -G spring
 
-# Exponer el puerto predeterminado
-EXPOSE 8080
+# 2. Copiar el .jar asignando directamente la propiedad al nuevo usuario
+COPY --from=build --chown=spring:spring /app/build/libs/*.jar app.jar
 
-# Comando para arrancar la aplicación
+# 3. Cambiar al usuario no-root antes de arrancar la aplicación
+USER spring:spring
+
 ENTRYPOINT ["java", "-jar", "app.jar"]

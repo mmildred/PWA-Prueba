@@ -24,7 +24,7 @@ public class PagarServicioRequest implements Serializable {
     private static final long serialVersionUID = 1L;
 
     @NotBlank(message = "El número de cuenta es obligatorio")
-    @Pattern(regexp = "^(CTA-)?[0-9]{10,20}$", message = "El formato del número de cuenta no es válido (ej. CTA-1029384756 o dígitos numéricos)")
+    @Pattern(regexp = "^(CTA-)?\\d{10,20}$", message = "El formato del número de cuenta no es válido (ej. CTA-1029384756 o dígitos numéricos)")
     @Schema(description = "Número de cuenta bancaria del cliente origen", example = "CTA-7281928374")
     private String numeroCuenta;
 

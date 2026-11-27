@@ -7,6 +7,7 @@ import lombok.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 
 @Entity
 @Table(name = "transacciones")
@@ -15,6 +16,8 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 public class Transaccion {
+
+    private static final ZoneId ZONA_HORARIA = ZoneId.of("America/Mexico_City");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -80,17 +83,19 @@ public class Transaccion {
     @Column(name = "fecha_creacion", nullable = false, updatable = false)
     private LocalDateTime fechaCreacion;
 
+    @Builder.Default
     @Column(name = "fecha_actualizacion", nullable = false)
-    private LocalDateTime fechaActualizacion;
+    private LocalDateTime fechaActualizacion = LocalDateTime.now(ZONA_HORARIA);
 
     @PrePersist
     public void prePersist() {
-        this.fechaCreacion = LocalDateTime.now();
-        this.fechaActualizacion = LocalDateTime.now();
+        LocalDateTime ahora = LocalDateTime.now(ZONA_HORARIA);
+        this.fechaCreacion = ahora;
+        this.fechaActualizacion = ahora;
     }
 
     @PreUpdate
     public void preUpdate() {
-        this.fechaActualizacion = LocalDateTime.now();
+        this.fechaActualizacion = LocalDateTime.now(ZONA_HORARIA);
     }
 }

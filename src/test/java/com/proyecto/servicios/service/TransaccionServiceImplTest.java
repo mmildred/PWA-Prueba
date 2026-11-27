@@ -10,7 +10,6 @@ import com.proyecto.servicios.exception.SaldoInsuficienteException;
 import com.proyecto.servicios.exception.ServiceCommunicationException;
 import com.proyecto.servicios.exception.ServiceTimeoutException;
 import com.proyecto.servicios.exception.TransaccionDuplicadaException;
-import com.proyecto.servicios.exception.TransaccionNoEncontradaException;
 import com.proyecto.servicios.model.producto.ProductoDTO;
 import com.proyecto.servicios.model.producto.ProductoListResponse;
 import com.proyecto.servicios.model.transaccion.ConciliarTransaccionRequest;

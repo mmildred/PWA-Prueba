@@ -99,7 +99,7 @@ public class ProductoServiceImpl implements com.proyecto.servicios.service.Produ
         if (message == null) {
             return "";
         }
-        return message.replaceAll("(?i)(bearer\\s+[a-zA-Z0-9._-]+)", "Bearer ***")
+        return message.replaceAll("(?i)(bearer\\s+[a-z0-9._-]+)", "Bearer ***")
                 .replaceAll("(?i)(password|token|secret)=[^&\\s]+", "$1=***");
     }
 }

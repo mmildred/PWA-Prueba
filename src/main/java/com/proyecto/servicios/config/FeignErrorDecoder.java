@@ -15,8 +15,6 @@ import java.nio.charset.StandardCharsets;
 @Slf4j
 public class FeignErrorDecoder implements ErrorDecoder {
 
-    private final ErrorDecoder defaultDecoder = new Default();
-
     @Override
     public Exception decode(String methodKey, Response response) {
         int status = response.status();
@@ -32,8 +30,7 @@ public class FeignErrorDecoder implements ErrorDecoder {
             case 403:
                 return new ServiceAuthenticationException(
                         "Acceso prohibido al servicio externo (403 Forbidden)", HttpStatus.FORBIDDEN);
-            case 408:
-            case 504:
+            case 408, 504:
                 return new ServiceTimeoutException(
                         "Tiempo de espera agotado al comunicarse con el servicio externo (" + status + ")");
             default:
